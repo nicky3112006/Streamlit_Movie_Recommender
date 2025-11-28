@@ -13,7 +13,7 @@ import requests
 # ======================================================================
 # TMDB CONFIG
 # ======================================================================
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "fb4409aa098199be14089c8489fd414d")
+TMDB_API_KEY = st.secrets.get('TMDB_API_KEY', "")
 USE_API = bool(TMDB_API_KEY)
 
 TMDB_LANGUAGE = "zh-TW"
