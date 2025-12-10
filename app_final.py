@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Streamlit Web App: 電影推薦系統
+Streamlit Web App: 電影推薦系統 (新增使用者評分功能)
 """
 
 import streamlit as st
@@ -88,13 +88,10 @@ def tmdb_get_trailer(movie_id: int) -> Optional[str]:
     if not videos:
         return None
  
-    # 只拿 YouTube 的
     yt = [v for v in videos if v.get("site") == "YouTube"]
  
-    # 1) 先挑正式 Trailer
     trailers = [v for v in yt if v.get("type") == "Trailer"]
  
-    # 1-1) 若有中文 trailer，優先
     zh_trailers = [
         v for v in trailers 
         if v.get("iso_639_1") in ("zh", "zh-TW", "zh-CN")
@@ -102,16 +99,13 @@ def tmdb_get_trailer(movie_id: int) -> Optional[str]:
     if zh_trailers:
         return f"https://www.youtube.com/watch?v={zh_trailers[0]['key']}"
  
-    # 1-2) 沒中文，挑第一個正式預告片
     if trailers:
         return f"https://www.youtube.com/watch?v={trailers[0]['key']}"
  
-    # 2) 沒有 Trailer → 挑 Teaser（避開 Shorts）
     teasers = [v for v in yt if v.get("type") == "Teaser"]
     if teasers:
         return f"https://www.youtube.com/watch?v={teasers[0]['key']}"
  
-    # 3) 最後才挑 fallback（避免 shorts）
     fallback = [v for v in yt if v.get("type") not in ("Clip", "Featurette")]
     if fallback:
         return f"https://www.youtube.com/watch?v={fallback[0]['key']}"
@@ -119,14 +113,10 @@ def tmdb_get_trailer(movie_id: int) -> Optional[str]:
     return None
 
 def _fetch(item: dict) -> Movie:
-    # 1. 嘗試抓中文翻譯名稱
     title_zh = item.get("title_zh") or item.get("name_zh")
-
-    # 2. 如果 original_title 本身是中文，也用它
     original_title = item.get("original_title")
     is_chinese = original_title and any("\u4e00" <= c <= "\u9fff" for c in original_title)
 
-    # 3. fallback：title（通常是英文）
     title = (
         title_zh
         or (original_title if is_chinese else None)
@@ -261,7 +251,6 @@ class DoublyLinkedList:
         self.tail=None
 
     def add(self, movie: Movie, user_rating=None):
-        # 防重複
         cur=self.head
         while cur:
             if cur.movie.id == movie.id:
@@ -292,6 +281,16 @@ class DoublyLinkedList:
                     self.tail=cur.prev
                 return True
             cur=cur.next
+        return False
+
+    def update_rating(self, movie_id: int, new_rating: float):
+        """更新指定電影的評分"""
+        cur = self.head
+        while cur:
+            if cur.movie.id == movie_id:
+                cur.user_rating = new_rating
+                return True
+            cur = cur.next
         return False
 
     def traverse_forward(self):
@@ -328,7 +327,7 @@ def create_movie_df(movie_list):
             "片名": m.title,
             "上映日期": m.release_date,
             "TMDB 評分": m.vote_average,
-            "劇情摘要": (m.overview[:120] + "...") if m.overview else "（無資料）",
+            "劇情摘要": (m.overview[:120] + "...") if m.overview else "(無資料)",
             "預告片": trailer_link
         })
     return pd.DataFrame(data)
@@ -339,11 +338,12 @@ def create_favorites_df():
         return pd.DataFrame()
     out=[]
     for i,node in enumerate(items):
+        rating_display = f"⭐ {node.user_rating}" if node.user_rating else "未評分"
         out.append({
             "收藏編號": i,
             "片名": node.movie.title,
             "TMDB ID": node.movie.id,
-            "我的評分": node.user_rating if node.user_rating else "未評分",
+            "我的評分": rating_display,
             "TMDB 評分": node.movie.vote_average,
         })
     return pd.DataFrame(out)
@@ -358,14 +358,15 @@ def analyze_mood(text):
         return None
     return max(score,key=score.get)
 
-def add_to_favorites_handler(idx):
+def add_to_favorites_handler(idx, rating=None):
     movie = st.session_state["search_results"].get_by_index(idx)
     if not movie:
         st.error("編號不存在")
         return
-    ok = st.session_state["favorites"].add(movie)
+    ok = st.session_state["favorites"].add(movie, user_rating=rating)
     if ok:
-        st.success(f"已加入收藏：{movie.title}")
+        rating_text = f" (評分: {rating})" if rating else ""
+        st.success(f"已加入收藏:{movie.title}{rating_text}")
     else:
         st.warning("已在收藏中")
 
@@ -377,7 +378,7 @@ st.title("🎬 智能電影推薦平台")
 st.markdown("---")
 
 if not USE_API:
-    st.warning("⚠️ 未設定 TMDB API Key，使用模擬資料中")
+    st.warning("⚠️ 未設定 TMDB API Key,使用模擬資料中")
 
 if "favorites" not in st.session_state:
     st.session_state["favorites"]=DoublyLinkedList()
@@ -388,8 +389,9 @@ menu = st.sidebar.radio("功能選單",[
     "1) 🔍 電影搜尋",
     "2) ⭐ 顯示收藏",
     "3) 🗑️ 移除收藏",
-    "4) 🧠 心情推薦",
-    "5) 🚪 離開"
+    "4) ✏️ 評分管理",
+    "5) 🧠 心情推薦",
+    "6) 🚪 離開"
 ])
 
 # ======================================================================
@@ -400,9 +402,8 @@ if menu.startswith("1"):
 
     tabs = st.tabs(["片名","類型","演員","地區","複合"])
     
-    # 片名
     with tabs[0]:
-        title = st.text_input("輸入電影片名關鍵字：")
+        title = st.text_input("輸入電影片名關鍵字:")
         if st.button("搜尋 A"):
             st.session_state["search_results"]=SingleLinkedList()
             if USE_API:
@@ -412,9 +413,8 @@ if menu.startswith("1"):
             for m in movies:
                 st.session_state["search_results"].insert_end(m)
 
-    # 類型
     with tabs[1]:
-        g = st.selectbox("選擇電影類型：", list(GENRE_MAP.keys()))
+        g = st.selectbox("選擇電影類型:", list(GENRE_MAP.keys()))
         if st.button("搜尋 B"):
             st.session_state["search_results"]=SingleLinkedList()
             if USE_API:
@@ -424,9 +424,8 @@ if menu.startswith("1"):
             for m in movies:
                 st.session_state["search_results"].insert_end(m)
 
-    # 演員
     with tabs[2]:
-        actor = st.text_input("輸入演員名稱：")
+        actor = st.text_input("輸入演員名稱:")
         if st.button("搜尋 C"):
             st.session_state["search_results"]=SingleLinkedList()
             if USE_API:
@@ -436,10 +435,9 @@ if menu.startswith("1"):
             for m in movies:
                 st.session_state["search_results"].insert_end(m)
 
-    # 地區
     with tabs[3]:
         all_cs = [c for group in REGION_MAP.values() for c in group]
-        cs = st.multiselect("選擇國家：", all_cs)
+        cs = st.multiselect("選擇國家:", all_cs)
         if st.button("搜尋 D"):
             st.session_state["search_results"]=SingleLinkedList()
             if USE_API and cs:
@@ -454,11 +452,10 @@ if menu.startswith("1"):
             for m in movies:
                 st.session_state["search_results"].insert_end(m)
 
-    # 複合
     with tabs[4]:
-        t = st.text_input("片名（可空）")
-        g = st.multiselect("類型（可空）", list(GENRE_MAP.keys()))
-        r = st.multiselect("地區（可空）", [c for group in REGION_MAP.values() for c in group])
+        t = st.text_input("片名(可空)")
+        g = st.multiselect("類型(可空)", list(GENRE_MAP.keys()))
+        r = st.multiselect("地區(可空)", [c for group in REGION_MAP.values() for c in group])
 
         if st.button("搜尋 E"):
             st.session_state["search_results"]=SingleLinkedList()
@@ -480,7 +477,6 @@ if menu.startswith("1"):
             for m in movies:
                 st.session_state["search_results"].insert_end(m)
 
-    # 結果呈現
     st.markdown("---")
     movies = st.session_state["search_results"].traverse()
     df = create_movie_df(movies)
@@ -489,13 +485,16 @@ if menu.startswith("1"):
         st.subheader("搜尋結果")
         st.markdown(df.to_html(escape=False), unsafe_allow_html=True)
 
-        col_add,_=st.columns([1,5])
+        st.subheader("📌 加入收藏")
+        col1, col2 = st.columns([1, 1])
+        
         max_idx = len(movies)-1
-
-        idx = col_add.number_input("輸入編號加入收藏：", min_value=0, max_value=max_idx, step=1, format="%d")
+        idx = col1.number_input("選擇編號:", min_value=0, max_value=max_idx, step=1, format="%d")
+        rating = col2.slider("給予評分 (可選):", min_value=0.0, max_value=10.0, step=0.5, value=0.0)
 
         if st.button("加入收藏"):
-            add_to_favorites_handler(idx)
+            final_rating = rating if rating > 0 else None
+            add_to_favorites_handler(idx, final_rating)
 
 
 # ======================================================================
@@ -517,38 +516,82 @@ elif menu.startswith("3"):
     st.header("移除收藏")
 
     df = create_favorites_df()
-    st.markdown(df.to_html(escape=False), unsafe_allow_html=True)
+    if df.empty:
+        st.info("目前沒有收藏")
+    else:
+        st.markdown(df.to_html(escape=False), unsafe_allow_html=True)
 
-    title = st.text_input("輸入要移除的電影名稱：")
-    if st.button("刪除"):
-        if st.session_state["favorites"].remove_by_title(title):
-            st.success("已刪除")
-        else:
-            st.error("找不到該電影")
+        title = st.text_input("輸入要移除的電影名稱:")
+        if st.button("刪除"):
+            if st.session_state["favorites"].remove_by_title(title):
+                st.success("已刪除")
+                st.rerun()
+            else:
+                st.error("找不到該電影")
 
 
 # ======================================================================
-# 4) MOOD RECOMMENDATION
-# ======================================================================
-# ======================================================================
-# 4) MOOD RECOMMENDATION
+# 4) RATING MANAGEMENT (新增)
 # ======================================================================
 elif menu.startswith("4"):
+    st.header("✏️ 評分管理")
+    
+    items = st.session_state["favorites"].traverse_forward()
+    
+    if not items:
+        st.info("收藏清單是空的,請先加入電影")
+    else:
+        st.subheader("目前收藏列表")
+        df = create_favorites_df()
+        st.markdown(df.to_html(escape=False), unsafe_allow_html=True)
+        
+        st.markdown("---")
+        st.subheader("更新評分")
+        
+        movie_options = {f"{i} - {node.movie.title}": (i, node.movie.id, node.user_rating) 
+                        for i, node in enumerate(items)}
+        
+        selected = st.selectbox("選擇要評分的電影:", list(movie_options.keys()))
+        
+        if selected:
+            idx, movie_id, current_rating = movie_options[selected]
+            current_val = current_rating if current_rating else 0.0
+            
+            st.info(f"目前評分: {current_rating if current_rating else '未評分'}")
+            
+            new_rating = st.slider(
+                "新評分:", 
+                min_value=0.0, 
+                max_value=10.0, 
+                step=0.5, 
+                value=float(current_val)
+            )
+            
+            if st.button("更新評分"):
+                if st.session_state["favorites"].update_rating(movie_id, new_rating):
+                    st.success(f"✅ 評分已更新為 {new_rating}")
+                    st.rerun()
+                else:
+                    st.error("更新失敗")
+
+
+# ======================================================================
+# 5) MOOD RECOMMENDATION
+# ======================================================================
+elif menu.startswith("5"):
     st.header("心情推薦")
 
-    text = st.text_area("描述你的心情：")
+    text = st.text_area("描述你的心情:")
 
-    # 1. 按下「推薦」時，更新 session_state["search_results"]
     if st.button("推薦"):
         mood = analyze_mood(text or "")
         if not mood:
-            st.info("無法判斷心情，自動推薦喜劇")
+            st.info("無法判斷心情,自動推薦喜劇")
             mood = "開心"
 
         genres = MOOD_TO_GENRE[mood]
-        st.success(f"偵測到心情：{mood} → 推薦類型：{genres}")
+        st.success(f"偵測到心情:{mood} → 推薦類型:{genres}")
 
-        # 建立結果清單
         results = SingleLinkedList()
 
         if USE_API:
@@ -564,36 +607,45 @@ elif menu.startswith("4"):
             for m in get_mock_movies():
                 results.insert_end(m)
 
-        # 把結果存到 session_state，之後「加入收藏」會用
         st.session_state["search_results"] = results
 
-    # 2. 無論有沒有剛按「推薦」，都試著讀 session_state 裡的結果來顯示
     movies = st.session_state["search_results"].traverse()
     df = create_movie_df(movies)
 
     if df.empty:
-        st.info("目前沒有推薦結果，請先按上面的『推薦』按鈕。")
+        st.info("目前沒有推薦結果,請先按上面的『推薦』按鈕。")
     else:
         st.markdown(df.to_html(escape=False), unsafe_allow_html=True)
 
-        col_add, _ = st.columns([1, 5])
+        st.subheader("📌 加入收藏")
+        col1, col2 = st.columns([1, 1])
         max_idx = len(movies) - 1
 
-        idx = col_add.number_input(
-            "輸入編號加入收藏：",
+        idx = col1.number_input(
+            "選擇編號:",
             min_value=0,
             max_value=max_idx,
             step=1,
             format="%d",
             key="mood_add_input"
         )
+        
+        rating = col2.slider(
+            "給予評分 (可選):", 
+            min_value=0.0, 
+            max_value=10.0, 
+            step=0.5, 
+            value=0.0,
+            key="mood_rating_slider"
+        )
 
-        if st.button("加入收藏（心情推薦）", key="mood_add_btn"):
-            add_to_favorites_handler(idx)
+        if st.button("加入收藏(心情推薦)", key="mood_add_btn"):
+            final_rating = rating if rating > 0 else None
+            add_to_favorites_handler(idx, final_rating)
 
 
 # ======================================================================
-# 5) EXIT
+# 6) EXIT
 # ======================================================================
 else:
     st.header("感謝使用")
